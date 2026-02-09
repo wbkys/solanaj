@@ -40,4 +40,16 @@ public class RpcSendTransactionConfig {
     @Builder.Default
     private long maxRetries = 0;
 
+    /**
+     * Optional commitment used during preflight simulation.
+     */
+    @JsonProperty("preflightCommitment")
+    private String preflightCommitment;
+
+    /**
+     * Optional minimum slot for bank context when sending.
+     */
+    @JsonProperty("minContextSlot")
+    private Long minContextSlot;
+
 }

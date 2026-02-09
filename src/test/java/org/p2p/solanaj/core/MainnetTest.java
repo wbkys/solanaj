@@ -763,9 +763,14 @@ public class MainnetTest extends AccountBasedTest {
         Block block = this.client.getApi().getBlock(124398367);
         assertEquals(112516757, block.getBlockHeight());
 
-        Block blockWithVersion = this.client.getApi().getBlock(124398367, Map.of(
-                "maxSupportedTransactionVersion", 0
-        ));
+        Block blockWithVersion = this.client.getApi().getBlock(
+                124398367,
+                null,
+                null,
+                null,
+                null,
+                0
+        );
         assertEquals(112516757, blockWithVersion.getBlockHeight());
     }
 

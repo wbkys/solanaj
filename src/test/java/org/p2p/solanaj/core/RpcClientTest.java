@@ -50,4 +50,23 @@ public class RpcClientTest {
         assertEquals(0.4f, endpoint3Percentage, 0.03);
     }
 
+    @Test
+    public void weightedClientRejectsZeroTotalWeight() {
+        WeightedEndpoint endpoint0 = new WeightedEndpoint("http://localhost:8899", 0);
+        WeightedEndpoint endpoint1 = new WeightedEndpoint("http://localhost:8898", 0);
+        WeightedCluster cluster = new WeightedCluster(Arrays.asList(endpoint0, endpoint1));
+        RpcClient client = new RpcClient(cluster);
+
+        assertThrows(IllegalStateException.class, client::getEndpoint);
+    }
+
+    @Test
+    public void weightedClientRejectsNullEndpointUrl() {
+        WeightedEndpoint endpoint0 = new WeightedEndpoint(null, 10);
+        WeightedCluster cluster = new WeightedCluster(Arrays.asList(endpoint0));
+        RpcClient client = new RpcClient(cluster);
+
+        assertThrows(NullPointerException.class, client::getEndpoint);
+    }
+
 }

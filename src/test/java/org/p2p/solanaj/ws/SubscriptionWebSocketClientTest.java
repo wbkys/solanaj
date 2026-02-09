@@ -112,6 +112,20 @@ class SubscriptionWebSocketClientTest {
         assertNull(retrievedId, "Subscription should be removed after unsubscribe");
     }
 
+    @Test
+    void testLogsSubscribeWithFilterOverload() throws Exception {
+        CompletableFuture<Long> subscriptionFuture = client.logsSubscribe(
+                "allWithVotes",
+                data -> LOGGER.info("Received filtered logs notification: " + data),
+                org.p2p.solanaj.rpc.types.config.Commitment.PROCESSED
+        );
+
+        Long subscriptionId = subscriptionFuture.get(10, TimeUnit.SECONDS);
+        assertNotNull(subscriptionId, "Subscription ID should not be null");
+
+        client.logsUnsubscribe(subscriptionId);
+    }
+
     @Nested
     @DisplayName("Mainnet Tests")
     class MainnetTests {
@@ -225,6 +239,21 @@ class SubscriptionWebSocketClientTest {
             // Verify subscription is removed
             Long retrievedId = mainnetClient.getSubscriptionId(TOKEN_PROGRAM);
             assertNull(retrievedId, "Subscription should be removed after unsubscribe");
+        }
+
+        @Test
+        @DisplayName("Test program subscription with map config overload on mainnet")
+        void testMainnetProgramSubscribeWithConfigMap() throws Exception {
+            CompletableFuture<Long> subscriptionFuture = mainnetClient.programSubscribe(
+                    TOKEN_PROGRAM,
+                    data -> LOGGER.info("Received Token Program update with map config: " + data),
+                    java.util.Map.of("encoding", "base64", "commitment", "confirmed")
+            );
+
+            Long subscriptionId = subscriptionFuture.get(10, TimeUnit.SECONDS);
+            assertNotNull(subscriptionId, "Subscription ID should not be null");
+
+            mainnetClient.programUnsubscribe(subscriptionId);
         }
         
         @Test

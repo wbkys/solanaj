@@ -83,6 +83,7 @@ public class SubscriptionWebSocketClient {
     private final AtomicBoolean shouldReconnect = new AtomicBoolean(true);
     
     private final Map<String, SubscriptionInfo> subscriptions = new ConcurrentHashMap<>();
+    private final Map<Long, SubscriptionInfo> activeSubscriptions = new ConcurrentHashMap<>();
     private final Map<Long, NotificationEventListener> subscriptionListeners = new ConcurrentHashMap<>();
     private final Map<Long, String> subscriptionToAccount = new ConcurrentHashMap<>();
     private final AtomicLong requestIdCounter = new AtomicLong(1);
@@ -150,12 +151,44 @@ public class SubscriptionWebSocketClient {
     public static SubscriptionWebSocketClient getInstance(String endpoint) {
         try {
             URI endpointURI = new URI(endpoint);
-            String scheme = "https".equals(endpointURI.getScheme()) ? "wss" : "ws";
-            String wsEndpoint = scheme + "://" + endpointURI.getHost();
+            String wsEndpoint = toWebSocketEndpoint(endpointURI);
             return new SubscriptionWebSocketClient(wsEndpoint);
         } catch (URISyntaxException e) {
             throw new IllegalArgumentException("Invalid endpoint URI", e);
         }
+    }
+
+    private static String toWebSocketEndpoint(URI endpointURI) {
+        String scheme = endpointURI.getScheme();
+        if (scheme == null) {
+            throw new IllegalArgumentException("Endpoint URI scheme is required");
+        }
+
+        String wsScheme;
+        switch (scheme.toLowerCase()) {
+            case "https":
+                wsScheme = "wss";
+                break;
+            case "http":
+                wsScheme = "ws";
+                break;
+            case "wss":
+            case "ws":
+                wsScheme = scheme.toLowerCase();
+                break;
+            default:
+                throw new IllegalArgumentException("Unsupported endpoint URI scheme: " + scheme);
+        }
+
+        String authority = endpointURI.getRawAuthority();
+        if (authority == null || authority.isBlank()) {
+            throw new IllegalArgumentException("Endpoint URI authority is required");
+        }
+
+        String path = endpointURI.getRawPath() == null ? "" : endpointURI.getRawPath();
+        String query = endpointURI.getRawQuery() == null ? "" : "?" + endpointURI.getRawQuery();
+
+        return wsScheme + "://" + authority + path + query;
     }
 
     /**
@@ -250,10 +283,10 @@ public class SubscriptionWebSocketClient {
                 String requestId = messageNode.has("id") ? messageNode.get("id").asText() : null;
                 
                 if (requestId != null) {
-                    SubscriptionInfo info = subscriptions.get(requestId);
+                    SubscriptionInfo info = subscriptions.remove(requestId);
                     if (info != null) {
+                        activeSubscriptions.put((long) subscriptionId, info);
                         subscriptionListeners.put((long) subscriptionId, info.listener);
-                        subscriptions.remove(requestId);
                         
                         // Track the account for this subscription
                         String account = extractAccountFromRequest((CustomRpcRequest) info.request);
@@ -418,8 +451,32 @@ public class SubscriptionWebSocketClient {
      * @return A CompletableFuture that will complete with the subscription ID when the subscription is established
      */
     public CompletableFuture<Long> signatureSubscribe(String signature, NotificationEventListener listener) {
+        return signatureSubscribe(signature, listener, null, null);
+    }
+
+    /**
+     * Subscribes to signature status changes with full signatureSubscribe config support.
+     *
+     * @param signature transaction signature
+     * @param listener callback for notifications
+     * @param commitment optional commitment level
+     * @param enableReceivedNotification optional flag to receive "receivedSignature" notifications
+     * @return future that resolves to the subscription id
+     */
+    public CompletableFuture<Long> signatureSubscribe(String signature, NotificationEventListener listener, Commitment commitment,
+                                                      Boolean enableReceivedNotification) {
         List<Object> params = new ArrayList<>();
         params.add(signature);
+        Map<String, Object> config = new ConcurrentHashMap<>();
+        if (commitment != null) {
+            config.put("commitment", commitment.getValue());
+        }
+        if (enableReceivedNotification != null) {
+            config.put("enableReceivedNotification", enableReceivedNotification);
+        }
+        if (!config.isEmpty()) {
+            params.add(config);
+        }
 
         CustomRpcRequest rpcRequest = new CustomRpcRequest("signatureSubscribe", params);
         return addSubscription(rpcRequest, listener, "signatureSubscribe", "signatureUnsubscribe");
@@ -437,6 +494,24 @@ public class SubscriptionWebSocketClient {
     }
 
     /**
+     * Subscribes to logs using a Solana string filter ("all" or "allWithVotes").
+     *
+     * @param filter logs filter string accepted by Solana RPC
+     * @param listener callback for notifications
+     * @param commitment optional commitment level
+     * @return future that resolves to the subscription id
+     */
+    public CompletableFuture<Long> logsSubscribe(String filter, NotificationEventListener listener, Commitment commitment) {
+        List<Object> params = new ArrayList<>();
+        params.add(filter);
+        if (commitment != null) {
+            params.add(Map.of("commitment", commitment.getValue()));
+        }
+        CustomRpcRequest rpcRequest = new CustomRpcRequest("logsSubscribe", params);
+        return addSubscription(rpcRequest, listener, "logsSubscribe", "logsUnsubscribe");
+    }
+
+    /**
      * Subscribes to log updates for the given mentions.
      *
      * @param mentions The mentions to subscribe to
@@ -444,9 +519,23 @@ public class SubscriptionWebSocketClient {
      * @return A CompletableFuture that will complete with the subscription ID when the subscription is established
      */
     public CompletableFuture<Long> logsSubscribe(List<String> mentions, NotificationEventListener listener) {
+        return logsSubscribe(mentions, listener, Commitment.PROCESSED);
+    }
+
+    /**
+     * Subscribes to logs mentioning one or more accounts/programs.
+     *
+     * @param mentions list of account/program mentions
+     * @param listener callback for notifications
+     * @param commitment optional commitment level
+     * @return future that resolves to the subscription id
+     */
+    public CompletableFuture<Long> logsSubscribe(List<String> mentions, NotificationEventListener listener, Commitment commitment) {
         List<Object> params = new ArrayList<>();
         params.add(Map.of("mentions", mentions));
-        params.add(Map.of("commitment", "processed"));
+        if (commitment != null) {
+            params.add(Map.of("commitment", commitment.getValue()));
+        }
 
         CustomRpcRequest rpcRequest = new CustomRpcRequest("logsSubscribe", params);
         return addSubscription(rpcRequest, listener, "logsSubscribe", "logsUnsubscribe");
@@ -461,19 +550,54 @@ public class SubscriptionWebSocketClient {
      * @return A CompletableFuture that will complete with the subscription ID when the subscription is established
      */
     public CompletableFuture<Long> blockSubscribe(NotificationEventListener listener, Commitment commitment, String encoding) {
+        return blockSubscribe("all", listener, commitment, encoding, "full", true, null);
+    }
+
+    /**
+     * Subscribes to block notifications with full blockSubscribe options.
+     *
+     * @param filter Solana blockSubscribe filter object/string
+     * @param listener callback for notifications
+     * @param commitment optional commitment level
+     * @param encoding optional response encoding
+     * @param transactionDetails optional transaction detail level
+     * @param showRewards optional rewards visibility
+     * @param maxSupportedTransactionVersion optional max supported transaction version
+     * @return future that resolves to the subscription id
+     */
+    public CompletableFuture<Long> blockSubscribe(Object filter, NotificationEventListener listener, Commitment commitment,
+                                                  String encoding, String transactionDetails, Boolean showRewards,
+                                                  Integer maxSupportedTransactionVersion) {
         List<Object> params = new ArrayList<>();
-        params.add(Map.of("encoding", encoding, "commitment", commitment.getValue()));
+        params.add(filter);
+        Map<String, Object> config = new ConcurrentHashMap<>();
+        if (encoding != null) {
+            config.put("encoding", encoding);
+        }
+        if (commitment != null) {
+            config.put("commitment", commitment.getValue());
+        }
+        if (transactionDetails != null) {
+            config.put("transactionDetails", transactionDetails);
+        }
+        if (showRewards != null) {
+            config.put("showRewards", showRewards);
+        }
+        if (maxSupportedTransactionVersion != null) {
+            config.put("maxSupportedTransactionVersion", maxSupportedTransactionVersion);
+        }
+        params.add(config);
 
         CustomRpcRequest rpcRequest = new CustomRpcRequest("blockSubscribe", params);
         return addSubscription(rpcRequest, listener, "blockSubscribe", "blockUnsubscribe");
     }
 
     public CompletableFuture<Long> blockSubscribe(NotificationEventListener listener, Commitment commitment) {
-        return blockSubscribe(listener, commitment, "json");
+        return blockSubscribe("all", listener, commitment, "json", "full", true, null);
     }
 
     public CompletableFuture<Long> blockSubscribe(NotificationEventListener listener) {
-        return blockSubscribe(listener, Commitment.FINALIZED, "json");
+        return blockSubscribe("all", listener, Commitment.FINALIZED, "json", "full", true, null);
     }
 
     /**
@@ -486,9 +610,23 @@ public class SubscriptionWebSocketClient {
      * @return A CompletableFuture that will complete with the subscription ID when the subscription is established
      */
     public CompletableFuture<Long> programSubscribe(String programId, NotificationEventListener listener, Commitment commitment, String encoding) {
+        return programSubscribe(programId, listener, Map.of("encoding", encoding, "commitment", commitment.getValue()));
+    }
+
+    /**
+     * Subscribes to program account changes with a caller-provided config map.
+     *
+     * @param programId target program id
+     * @param listener callback for notifications
+     * @param config optional Solana programSubscribe config
+     * @return future that resolves to the subscription id
+     */
+    public CompletableFuture<Long> programSubscribe(String programId, NotificationEventListener listener, Map<String, Object> config) {
         List<Object> params = new ArrayList<>();
         params.add(programId);
-        params.add(Map.of("encoding", encoding, "commitment", commitment.getValue()));
+        if (config != null && !config.isEmpty()) {
+            params.add(config);
+        }
 
         CustomRpcRequest rpcRequest = new CustomRpcRequest("programSubscribe", params);
         return addSubscription(rpcRequest, listener, "programSubscribe", "programUnsubscribe");
@@ -594,23 +732,15 @@ public class SubscriptionWebSocketClient {
      * @param subscriptionId The subscription ID to unsubscribe from
      */
     public void unsubscribe(Long subscriptionId) {
+        SubscriptionInfo subscriptionInfo = activeSubscriptions.remove(subscriptionId);
         NotificationEventListener listener = subscriptionListeners.remove(subscriptionId);
         String account = subscriptionToAccount.remove(subscriptionId);
         
-        if (listener != null) {
+        if (listener != null && subscriptionInfo != null) {
             List<Object> params = new ArrayList<>();
             params.add(subscriptionId);
-            
-            // Find the unsubscribe method for this subscription
-            String unsubscribeMethod = "accountUnsubscribe"; // Default
-            for (SubscriptionInfo info : subscriptions.values()) {
-                if (info.listener == listener) {
-                    unsubscribeMethod = info.unsubscribeMethod;
-                    break;
-                }
-            }
-            
-            CustomRpcRequest unsubRequest = new CustomRpcRequest(unsubscribeMethod, params);
+
+            CustomRpcRequest unsubRequest = new CustomRpcRequest(subscriptionInfo.unsubscribeMethod, params);
             unsubRequest.setId(String.valueOf(requestIdCounter.getAndIncrement()));
             
             sendRequest(unsubRequest);
@@ -618,6 +748,69 @@ public class SubscriptionWebSocketClient {
         } else {
             LOGGER.warning("Attempted to unsubscribe from non-existent subscription: " + subscriptionId);
         }
+    }
+
+    /**
+     * Convenience alias matching Solana's accountUnsubscribe method name.
+     */
+    public void accountUnsubscribe(Long subscriptionId) {
+        unsubscribe(subscriptionId);
+    }
+
+    /**
+     * Convenience alias matching Solana's blockUnsubscribe method name.
+     */
+    public void blockUnsubscribe(Long subscriptionId) {
+        unsubscribe(subscriptionId);
+    }
+
+    /**
+     * Convenience alias matching Solana's logsUnsubscribe method name.
+     */
+    public void logsUnsubscribe(Long subscriptionId) {
+        unsubscribe(subscriptionId);
+    }
+
+    /**
+     * Convenience alias matching Solana's programUnsubscribe method name.
+     */
+    public void programUnsubscribe(Long subscriptionId) {
+        unsubscribe(subscriptionId);
+    }
+
+    /**
+     * Convenience alias matching Solana's rootUnsubscribe method name.
+     */
+    public void rootUnsubscribe(Long subscriptionId) {
+        unsubscribe(subscriptionId);
+    }
+
+    /**
+     * Convenience alias matching Solana's signatureUnsubscribe method name.
+     */
+    public void signatureUnsubscribe(Long subscriptionId) {
+        unsubscribe(subscriptionId);
+    }
+
+    /**
+     * Convenience alias matching Solana's slotUnsubscribe method name.
+     */
+    public void slotUnsubscribe(Long subscriptionId) {
+        unsubscribe(subscriptionId);
+    }
+
+    /**
+     * Convenience alias matching Solana's slotsUpdatesUnsubscribe method name.
+     */
+    public void slotsUpdatesUnsubscribe(Long subscriptionId) {
+        unsubscribe(subscriptionId);
+    }
+
+    /**
+     * Convenience alias matching Solana's voteUnsubscribe method name.
+     */
+    public void voteUnsubscribe(Long subscriptionId) {
+        unsubscribe(subscriptionId);
     }
 
     /**
@@ -669,17 +862,28 @@ public class SubscriptionWebSocketClient {
      */
     private void resubscribeAll() {
         LOGGER.info("Resubscribing to all active subscriptions");
-        Map<String, SubscriptionInfo> currentSubscriptions = new ConcurrentHashMap<>(subscriptions);
+
+        List<SubscriptionInfo> currentSubscriptions = new ArrayList<>();
+        currentSubscriptions.addAll(activeSubscriptions.values());
+        currentSubscriptions.addAll(subscriptions.values());
+
         subscriptions.clear();
+        activeSubscriptions.clear();
+        subscriptionListeners.clear();
+        subscriptionToAccount.clear();
         
-        for (SubscriptionInfo info : currentSubscriptions.values()) {
+        for (SubscriptionInfo info : currentSubscriptions) {
             String requestId = String.valueOf(requestIdCounter.getAndIncrement());
             CustomRpcRequest newRequest = new CustomRpcRequest(info.request.getMethod(), info.request.getParams());
             newRequest.setId(requestId);
             
-            // Create a new CompletableFuture for the resubscription
-            CompletableFuture<Long> newFuture = new CompletableFuture<>();
-            SubscriptionInfo newInfo = new SubscriptionInfo(newRequest, info.listener, info.method, info.unsubscribeMethod, newFuture);
+            SubscriptionInfo newInfo = new SubscriptionInfo(
+                    newRequest,
+                    info.listener,
+                    info.method,
+                    info.unsubscribeMethod,
+                    info.subscriptionFuture
+            );
             subscriptions.put(requestId, newInfo);
             sendRequest(newRequest);
         }

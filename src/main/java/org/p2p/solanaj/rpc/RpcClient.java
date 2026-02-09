@@ -7,15 +7,18 @@ import okhttp3.RequestBody;
 import okhttp3.Response;
 import okhttp3.Protocol;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Objects;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.zip.GZIPInputStream;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.core.JsonProcessingException;
-import java.util.zip.GZIPInputStream;
-import java.io.ByteArrayInputStream;
 
 import org.p2p.solanaj.rpc.types.RpcRequest;
 import org.p2p.solanaj.rpc.types.RpcResponse;
@@ -34,7 +37,7 @@ import java.util.Arrays;
 public class RpcClient {
     private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
     private String endpoint;
-    private OkHttpClient httpClient;
+    private final OkHttpClient httpClient;
     private RpcApi rpcApi;
     private WeightedCluster cluster;
     private final ObjectMapper objectMapper; // Reuse ObjectMapper instance
@@ -184,18 +187,21 @@ public class RpcClient {
             Request request = new Request.Builder().url(getEndpoint())
                     .header("Accept-Encoding", "gzip, deflate")
                     .post(RequestBody.create(objectMapper.writeValueAsString(rpcRequest), JSON)).build();
-            Response response = httpClient.newCall(request).execute();
-            
-            // Handle gzip decompression manually if needed
             String result;
-            String contentEncoding = response.header("Content-Encoding");
-            if ("gzip".equals(contentEncoding)) {
-                // Manually decompress gzipped content
-                try (GZIPInputStream gzipStream = new GZIPInputStream(new ByteArrayInputStream(response.body().bytes()))) {
-                    result = new String(gzipStream.readAllBytes());
+            try (Response response = httpClient.newCall(request).execute()) {
+                if (response.body() == null) {
+                    throw new RpcException("RPC response body is empty");
                 }
-            } else {
-                result = response.body().string();
+
+                byte[] bodyBytes = response.body().bytes();
+                String contentEncoding = response.header("Content-Encoding");
+                if ("gzip".equalsIgnoreCase(contentEncoding)) {
+                    try (GZIPInputStream gzipStream = new GZIPInputStream(new ByteArrayInputStream(bodyBytes))) {
+                        result = new String(gzipStream.readAllBytes(), StandardCharsets.UTF_8);
+                    }
+                } else {
+                    result = new String(bodyBytes, StandardCharsets.UTF_8);
+                }
             }
             
             RpcResponse<T> rpcResult = objectMapper.readValue(result, 
@@ -208,7 +214,6 @@ public class RpcClient {
             
             return rpcResult.getResult();
         } catch (SSLHandshakeException e) {
-            this.httpClient = createOptimizedClientBuilder().build();
             throw new RpcException("SSL Handshake failed: " + e.getMessage());
         } catch (JsonProcessingException e) {
             throw new RpcException("JSON processing error during RPC call: " + e.getMessage());
@@ -243,16 +248,38 @@ public class RpcClient {
      * @return String RPCEndpoint
      */
     private String getWeightedEndpoint() {
-        int totalWeight = cluster.endpoints.stream().mapToInt(WeightedEndpoint::getWeight).sum();
-        double randomNumber = Math.random() * totalWeight;
+        List<WeightedEndpoint> endpoints = cluster.getEndpoints();
+        if (endpoints == null || endpoints.isEmpty()) {
+            throw new IllegalStateException("Weighted cluster must contain at least one endpoint");
+        }
+
+        int totalWeight = endpoints.stream()
+                .filter(Objects::nonNull)
+                .map(WeightedEndpoint::getWeight)
+                .mapToInt(weight -> Math.max(weight == null ? 0 : weight, 0))
+                .sum();
+
+        if (totalWeight <= 0) {
+            throw new IllegalStateException("Weighted cluster total weight must be greater than 0");
+        }
+
+        int randomNumber = ThreadLocalRandom.current().nextInt(totalWeight);
         int currentWeight = 0;
 
-        for (WeightedEndpoint endpoint : cluster.endpoints) {
-            currentWeight += endpoint.getWeight();
+        for (WeightedEndpoint endpoint : endpoints) {
+            if (endpoint == null) {
+                continue;
+            }
+            int weight = Math.max(endpoint.getWeight() == null ? 0 : endpoint.getWeight(), 0);
+            if (weight == 0) {
+                continue;
+            }
+            currentWeight += weight;
             if (randomNumber < currentWeight) {
-                return endpoint.getUrl();
+                return Objects.requireNonNull(endpoint.getUrl(), "Weighted endpoint URL cannot be null");
             }
         }
-        return ""; // Return empty string if no endpoint is found
+
+        throw new IllegalStateException("Unable to select RPC endpoint from weighted cluster");
     }
 }
