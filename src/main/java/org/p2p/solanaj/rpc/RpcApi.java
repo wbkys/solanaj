@@ -28,14 +28,34 @@ public class RpcApi {
     }
 
     public LatestBlockhash getLatestBlockhash() throws RpcException {
-        return getLatestBlockhash(null);
+        return getLatestBlockhash(null, null);
     }
 
     public LatestBlockhash getLatestBlockhash(Commitment commitment) throws RpcException {
+        return getLatestBlockhash(commitment, null);
+    }
+
+    /**
+     * Gets the latest blockhash with explicit optional parameters.
+     *
+     * @param commitment optional commitment level
+     * @param minContextSlot optional minimum context slot
+     * @return latest blockhash result payload
+     * @throws RpcException if the RPC call fails
+     */
+    public LatestBlockhash getLatestBlockhash(Commitment commitment, Long minContextSlot) throws RpcException {
         List<Object> params = new ArrayList<>();
+        Map<String, Object> config = new HashMap<>();
 
         if (commitment != null) {
-            params.add(Map.of("commitment", commitment.getValue()));
+            config.put("commitment", commitment.getValue());
+        }
+        if (minContextSlot != null) {
+            config.put("minContextSlot", minContextSlot);
+        }
+
+        if (!config.isEmpty()) {
+            params.add(config);
         }
 
         return client.call("getLatestBlockhash", params, LatestBlockhash.class);
@@ -147,34 +167,67 @@ public class RpcApi {
     }
 
     public long getBalance(PublicKey account) throws RpcException {
-        return getBalance(account, null);
+        return getBalance(account, null, null);
     }
 
     public long getBalance(PublicKey account, Commitment commitment) throws RpcException {
+        return getBalance(account, commitment, null);
+    }
+
+    /**
+     * Gets account balance with explicit optional parameters.
+     *
+     * @param account account public key
+     * @param commitment optional commitment level
+     * @param minContextSlot optional minimum context slot
+     * @return balance in lamports
+     * @throws RpcException if the RPC call fails
+     */
+    public long getBalance(PublicKey account, Commitment commitment, Long minContextSlot) throws RpcException {
         List<Object> params = new ArrayList<>();
 
         params.add(account.toString());
+        Map<String, Object> config = new HashMap<>();
         if (commitment != null) {
-            params.add(Map.of("commitment", commitment.getValue()));
+            config.put("commitment", commitment.getValue());
+        }
+        if (minContextSlot != null) {
+            config.put("minContextSlot", minContextSlot);
+        }
+        if (!config.isEmpty()) {
+            params.add(config);
         }
 
         return client.call("getBalance", params, ValueLong.class).getValue();
     }
 
     public ConfirmedTransaction getTransaction(String signature) throws RpcException {
-        return getTransaction(signature, null);
+        return getTransaction(signature, null, 0);
     }
 
     public ConfirmedTransaction getTransaction(String signature, Commitment commitment) throws RpcException {
+        return getTransaction(signature, commitment, 0);
+    }
+
+    /**
+     * Gets transaction details with explicit optional parameters.
+     *
+     * @param signature transaction signature
+     * @param commitment optional commitment level
+     * @param maxSupportedTransactionVersion optional max supported version (defaults to 0 when null)
+     * @return confirmed transaction payload
+     * @throws RpcException if the RPC call fails
+     */
+    public ConfirmedTransaction getTransaction(String signature, Commitment commitment,
+                                               Integer maxSupportedTransactionVersion) throws RpcException {
         List<Object> params = new ArrayList<>();
         params.add(signature);
         Map<String, Object> parameterMap = new HashMap<>();
-
         if (commitment != null) {
-            parameterMap.put("commitment", commitment);
+            parameterMap.put("commitment", commitment.getValue());
         }
-
-        parameterMap.put("maxSupportedTransactionVersion", 0);
+        parameterMap.put("maxSupportedTransactionVersion",
+                maxSupportedTransactionVersion == null ? 0 : maxSupportedTransactionVersion);
         params.add(parameterMap);
         return client.call("getTransaction", params, ConfirmedTransaction.class);
     }
@@ -204,9 +257,20 @@ public class RpcApi {
     public List<SignatureInformation> getSignaturesForAddress(PublicKey account, int limit, Commitment commitment, String before, String until)
             throws RpcException {
         List<Object> params = new ArrayList<>();
-
         params.add(account.toString());
-        params.add(new ConfirmedSignFAddr2(limit, commitment, before, until));
+
+        Map<String, Object> config = new HashMap<>();
+        config.put("limit", limit);
+        if (before != null) {
+            config.put("before", before);
+        }
+        if (until != null) {
+            config.put("until", until);
+        }
+        if (commitment != null) {
+            config.put("commitment", commitment.getValue());
+        }
+        params.add(config);
 
         List<AbstractMap<String, Object>> rawResult = callWithGenericType("getSignaturesForAddress", params, List.class);
 
@@ -241,6 +305,23 @@ public class RpcApi {
         return getProgramAccounts(account, new ProgramAccountConfig(Encoding.base64));
     }
 
+    public List<ProgramAccount> getProgramAccounts(PublicKey account, Commitment commitment,
+                                                   boolean withContext, Long minContextSlot) throws RpcException {
+        ProgramAccountConfig config = new ProgramAccountConfig(Encoding.base64);
+        if (commitment != null) {
+            config.setCommitment(commitment.getValue());
+        }
+        config.setWithContext(withContext);
+        config.setMinContextSlot(minContextSlot);
+        return getProgramAccounts(account, config);
+    }
+
+    /**
+     * Gets program-owned accounts using a typed config object.
+     *
+     * <p>This is the preferred advanced overload for getProgramAccounts because callers get
+     * compile-time field names instead of stringly-typed maps.
+     */
     public List<ProgramAccount> getProgramAccounts(PublicKey account, ProgramAccountConfig programAccountConfig)
             throws RpcException {
         List<Object> params = new ArrayList<>();
@@ -251,14 +332,8 @@ public class RpcApi {
             params.add(programAccountConfig);
         }
 
-        List<AbstractMap<String, Object>> rawResult = callWithGenericType("getProgramAccounts", params, List.class);
-
-        List<ProgramAccount> result = new ArrayList<>();
-        for (AbstractMap<String, Object> item : rawResult) {
-            result.add(new ProgramAccount(item));
-        }
-
-        return result;
+        Object rawResult = callWithGenericType("getProgramAccounts", params, Object.class);
+        return toProgramAccounts(rawResult);
     }
 
     public List<ProgramAccount> getProgramAccounts(PublicKey account, List<Memcmp> memcmpList, int dataSize)
@@ -279,13 +354,7 @@ public class RpcApi {
         params.add(programAccountConfig);
 
         List<AbstractMap<String, Object>> rawResult = callWithGenericType("getProgramAccounts", params, List.class);
-
-        List<ProgramAccount> result = new ArrayList<>();
-        for (AbstractMap<String, Object> item : rawResult) {
-            result.add(new ProgramAccount(item));
-        }
-
-        return result;
+        return toProgramAccounts(rawResult);
     }
 
     /**
@@ -320,13 +389,7 @@ public class RpcApi {
         params.add(programAccountConfig);
 
         List<AbstractMap<String, Object>> rawResult = callWithGenericType("getProgramAccounts", params, List.class);
-
-        List<ProgramAccount> result = new ArrayList<>();
-        for (AbstractMap<String, Object> item : rawResult) {
-            result.add(new ProgramAccount(item));
-        }
-
-        return result;
+        return toProgramAccounts(rawResult);
     }
 
     public List<ProgramAccount> getProgramAccounts(PublicKey account, List<Memcmp> memcmpList) throws RpcException {
@@ -344,12 +407,37 @@ public class RpcApi {
         params.add(programAccountConfig);
 
         List<AbstractMap<String, Object>> rawResult = callWithGenericType("getProgramAccounts", params, List.class);
+        return toProgramAccounts(rawResult);
+    }
 
+    private List<ProgramAccount> toProgramAccounts(Object rawResult) {
         List<ProgramAccount> result = new ArrayList<>();
-        for (AbstractMap<String, Object> item : rawResult) {
-            result.add(new ProgramAccount(item));
+
+        if (rawResult instanceof List<?> rawList) {
+            // Standard getProgramAccounts response shape.
+            for (Object item : rawList) {
+                if (item instanceof AbstractMap<?, ?> rawMap) {
+                    @SuppressWarnings("unchecked")
+                    AbstractMap<String, Object> typedMap = (AbstractMap<String, Object>) rawMap;
+                    result.add(new ProgramAccount(typedMap));
+                }
+            }
+            return result;
         }
 
+        if (rawResult instanceof Map<?, ?> rawMap) {
+            // withContext response shape, where account array is nested under "value".
+            Object valueObj = rawMap.get("value");
+            if (valueObj instanceof List<?> valueList) {
+                for (Object item : valueList) {
+                    if (item instanceof AbstractMap<?, ?> valueMap) {
+                        @SuppressWarnings("unchecked")
+                        AbstractMap<String, Object> typedMap = (AbstractMap<String, Object>) valueMap;
+                        result.add(new ProgramAccount(typedMap));
+                    }
+                }
+            }
+        }
         return result;
     }
 
@@ -436,19 +524,34 @@ public class RpcApi {
     }
 
     public BlockProduction getBlockProduction() throws RpcException {
-        return getBlockProduction(new HashMap<>());
+        return getBlockProduction(null, null, null, null);
     }
 
-    // TODO - implement the parameters - currently takes in none
-    public BlockProduction getBlockProduction(Map<String, Object> optionalParams) throws RpcException {
+    public BlockProduction getBlockProduction(Commitment commitment, PublicKey identity,
+                                              Long firstSlot, Long lastSlot) throws RpcException {
         List<Object> params = new ArrayList<>();
+        Map<String, Object> config = new HashMap<>();
 
-        Map<String, Object> parameterMap = new HashMap<>();
-        if (optionalParams.containsKey("commitment")) {
-            Commitment commitment = (Commitment) optionalParams.get("commitment");
-            parameterMap.put("commitment", commitment.getValue());
+        if (commitment != null) {
+            config.put("commitment", commitment.getValue());
         }
-        params.add(parameterMap);
+        if (identity != null) {
+            config.put("identity", identity.toBase58());
+        }
+        if (firstSlot != null || lastSlot != null) {
+            Map<String, Object> range = new HashMap<>();
+            if (firstSlot != null) {
+                range.put("firstSlot", firstSlot);
+            }
+            if (lastSlot != null) {
+                range.put("lastSlot", lastSlot);
+            }
+            config.put("range", range);
+        }
+
+        if (!config.isEmpty()) {
+            params.add(config);
+        }
 
         return client.call("getBlockProduction", params, BlockProduction.class);
     }
@@ -653,17 +756,27 @@ public class RpcApi {
         );
         simulateTransactionConfig.setReplaceRecentBlockhash(true);
 
+        return simulateTransaction(transaction, simulateTransactionConfig);
+    }
+
+    /**
+     * Simulates a transaction using caller-supplied Solana simulation config.
+     *
+     * @param transaction serialized transaction string
+     * @param simulateTransactionConfig config object controlling simulation behavior
+     * @return simulation result payload
+     * @throws RpcException if the RPC call fails
+     */
+    public SimulatedTransaction simulateTransaction(String transaction, SimulateTransactionConfig simulateTransactionConfig) throws RpcException {
         List<Object> params = new ArrayList<>();
         params.add(transaction);
         params.add(simulateTransactionConfig);
 
-        SimulatedTransaction simulatedTransaction = client.call(
+        return client.call(
                 "simulateTransaction",
                 params,
                 SimulatedTransaction.class
         );
-
-        return simulatedTransaction;
     }
 
 
@@ -699,26 +812,34 @@ public class RpcApi {
      * Returns identity and transaction information about a confirmed block in the ledger
      */
     public Block getBlock(int slot) throws RpcException {
-        return getBlock(slot, null);
+        return getBlock(slot, null, null, null, null, null);
     }
 
-    public Block getBlock(int slot, Map<String, Object> optionalParams) throws RpcException {
+    public Block getBlock(int slot, Commitment commitment, String encoding, String transactionDetails,
+                          Boolean rewards, Integer maxSupportedTransactionVersion) throws RpcException {
         List<Object> params = new ArrayList<>();
 
         params.add(slot);
+        Map<String, Object> config = new HashMap<>();
 
-        if (optionalParams != null) {
-            BlockConfig blockConfig = new BlockConfig();
-            if (optionalParams.containsKey("commitment")) {
-                Commitment commitment = (Commitment) optionalParams.get("commitment");
-                blockConfig.setCommitment(commitment.getValue());
-            }
+        if (commitment != null) {
+            config.put("commitment", commitment.getValue());
+        }
+        if (encoding != null) {
+            config.put("encoding", encoding);
+        }
+        if (transactionDetails != null) {
+            config.put("transactionDetails", transactionDetails);
+        }
+        if (rewards != null) {
+            config.put("rewards", rewards);
+        }
+        if (maxSupportedTransactionVersion != null) {
+            config.put("maxSupportedTransactionVersion", maxSupportedTransactionVersion);
+        }
 
-            if (optionalParams.containsKey("maxSupportedTransactionVersion")) {
-                blockConfig.setMaxSupportedTransactionVersion((Integer) optionalParams.get("maxSupportedTransactionVersion"));
-            }
-
-            params.add(blockConfig);
+        if (!config.isEmpty()) {
+            params.add(config);
         }
 
         return client.call("getBlock", params, Block.class);
@@ -902,14 +1023,32 @@ public class RpcApi {
     }
 
     public Supply getSupply() throws RpcException {
-        return getSupply(null);
+        return getSupply(null, null);
     }
 
     public Supply getSupply(Commitment commitment) throws RpcException {
-        List<Object> params = new ArrayList<>();
+        return getSupply(commitment, null);
+    }
 
+    /**
+     * Gets supply statistics with explicit optional parameters.
+     *
+     * @param commitment optional commitment level
+     * @param excludeNonCirculatingAccountsList optional flag to omit non-circulating account list
+     * @return supply payload
+     * @throws RpcException if the RPC call fails
+     */
+    public Supply getSupply(Commitment commitment, Boolean excludeNonCirculatingAccountsList) throws RpcException {
+        List<Object> params = new ArrayList<>();
+        Map<String, Object> config = new HashMap<>();
         if (commitment != null) {
-            params.add(Map.of("commitment", commitment.getValue()));
+            config.put("commitment", commitment.getValue());
+        }
+        if (excludeNonCirculatingAccountsList != null) {
+            config.put("excludeNonCirculatingAccountsList", excludeNonCirculatingAccountsList);
+        }
+        if (!config.isEmpty()) {
+            params.add(config);
         }
 
         return client.call("getSupply", params, Supply.class);
@@ -1043,6 +1182,9 @@ public class RpcApi {
             if (optionalParams.containsKey("dataSlice")) {
                 parameterMap.put("dataSlice", optionalParams.get("dataSlice"));
             }
+            if (optionalParams.containsKey("minContextSlot")) {
+                parameterMap.put("minContextSlot", optionalParams.get("minContextSlot"));
+            }
             params.add(parameterMap);
         }
 
@@ -1054,6 +1196,11 @@ public class RpcApi {
     }
 
     public VoteAccounts getVoteAccounts(PublicKey votePubkey, Commitment commitment) throws RpcException {
+        return getVoteAccounts(votePubkey, commitment, null, null);
+    }
+
+    public VoteAccounts getVoteAccounts(PublicKey votePubkey, Commitment commitment, Boolean keepUnstakedDelinquents,
+                                        Long delinquentSlotDistance) throws RpcException {
         List<Object> params = new ArrayList<>();
 
         VoteAccountConfig voteAccountConfig = new VoteAccountConfig();
@@ -1062,6 +1209,12 @@ public class RpcApi {
         }
         if (commitment != null) {
             voteAccountConfig.setCommitment(commitment.getValue());
+        }
+        if (keepUnstakedDelinquents != null) {
+            voteAccountConfig.setKeepUnstakedDelinquents(keepUnstakedDelinquents);
+        }
+        if (delinquentSlotDistance != null) {
+            voteAccountConfig.setDelinquentSlotDistance(delinquentSlotDistance);
         }
         params.add(voteAccountConfig);
 
@@ -1097,6 +1250,10 @@ public class RpcApi {
         params.add(new SignatureStatusConfig(searchTransactionHistory));
 
         return client.call("getSignatureStatuses", params, SignatureStatuses.class);
+    }
+
+    public SignatureStatuses getSignatureStatuses(List<String> signatures) throws RpcException {
+        return getSignatureStatuses(signatures, false);
     }
 
     public List<PerformanceSample> getRecentPerformanceSamples() throws RpcException {
@@ -1260,7 +1417,7 @@ public class RpcApi {
     public boolean isBlockhashValid(String blockHash, Commitment commitment, Long minContextSlot) throws RpcException {
         Map<String, Object> parameterMap = new HashMap<>();
         if (commitment != null) {
-            parameterMap.put("commitment", commitment);
+            parameterMap.put("commitment", commitment.getValue());
         }
 
         if (minContextSlot != null) {

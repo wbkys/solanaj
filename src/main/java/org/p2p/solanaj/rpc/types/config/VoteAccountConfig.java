@@ -7,8 +7,24 @@ import lombok.Getter;
 @Setter
 public class VoteAccountConfig {
 
+    /**
+     * Optional vote account public key filter.
+     */
     private String votePubkey;
 
+    /**
+     * Optional commitment level.
+     */
     private String commitment;
+
+    /**
+     * Optional inclusion of delinquent validators without stake.
+     */
+    private Boolean keepUnstakedDelinquents;
+
+    /**
+     * Optional delinquent distance threshold in slots.
+     */
+    private Long delinquentSlotDistance;
 
 }

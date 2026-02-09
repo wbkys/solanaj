@@ -16,6 +16,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
+import org.p2p.solanaj.rpc.types.config.Commitment;
 
 import okhttp3.WebSocket;
 
@@ -105,6 +106,67 @@ public class SubscriptionWebSocketClientUnitTest {
         }
     }
 
+    @Test
+    public void signatureSubscribeSupportsCommitmentAndReceivedNotificationFlag() throws Exception {
+        SubscriptionWebSocketClient client = SubscriptionWebSocketClient.getExactPathInstance("ws://127.0.0.1:1");
+        try {
+            WebSocket webSocket = prepareMockedConnectedSocket(client);
+
+            client.signatureSubscribe("sig-value", data -> {
+            }, Commitment.CONFIRMED, true);
+
+            ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
+            verify(webSocket, atLeastOnce()).send(payloadCaptor.capture());
+            String payload = payloadCaptor.getValue();
+            assertTrue(payload.contains("\"method\":\"signatureSubscribe\""));
+            assertTrue(payload.contains("\"commitment\":\"confirmed\""));
+            assertTrue(payload.contains("\"enableReceivedNotification\":true"));
+        } finally {
+            client.close();
+        }
+    }
+
+    @Test
+    public void blockSubscribeSupportsFilterAndExtendedConfigOptions() throws Exception {
+        SubscriptionWebSocketClient client = SubscriptionWebSocketClient.getExactPathInstance("ws://127.0.0.1:1");
+        try {
+            WebSocket webSocket = prepareMockedConnectedSocket(client);
+
+            client.blockSubscribe(Map.of("mentionsAccountOrProgram", "So11111111111111111111111111111111111111112"), data -> {
+            }, Commitment.FINALIZED, "json", "signatures", false, 0);
+
+            ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
+            verify(webSocket, atLeastOnce()).send(payloadCaptor.capture());
+            String payload = payloadCaptor.getValue();
+            assertTrue(payload.contains("\"method\":\"blockSubscribe\""));
+            assertTrue(payload.contains("\"transactionDetails\":\"signatures\""));
+            assertTrue(payload.contains("\"showRewards\":false"));
+            assertTrue(payload.contains("\"maxSupportedTransactionVersion\":0"));
+        } finally {
+            client.close();
+        }
+    }
+
+    @Test
+    public void logsSubscribeSupportsAllWithVotesFilter() throws Exception {
+        SubscriptionWebSocketClient client = SubscriptionWebSocketClient.getExactPathInstance("ws://127.0.0.1:1");
+        try {
+            WebSocket webSocket = prepareMockedConnectedSocket(client);
+
+            client.logsSubscribe("allWithVotes", data -> {
+            }, Commitment.PROCESSED);
+
+            ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
+            verify(webSocket, atLeastOnce()).send(payloadCaptor.capture());
+            String payload = payloadCaptor.getValue();
+            assertTrue(payload.contains("\"method\":\"logsSubscribe\""));
+            assertTrue(payload.contains("\"allWithVotes\""));
+            assertTrue(payload.contains("\"commitment\":\"processed\""));
+        } finally {
+            client.close();
+        }
+    }
+
     private void invokeHandleMessage(SubscriptionWebSocketClient client, String message) throws Exception {
         Method method = SubscriptionWebSocketClient.class.getDeclaredMethod("handleMessage", String.class);
         method.setAccessible(true);
@@ -128,5 +190,20 @@ public class SubscriptionWebSocketClientUnitTest {
         Field field = SubscriptionWebSocketClient.class.getDeclaredField(fieldName);
         field.setAccessible(true);
         field.set(client, value);
+    }
+
+    private WebSocket prepareMockedConnectedSocket(SubscriptionWebSocketClient client) throws Exception {
+        // Allow the initial localhost connect attempt to fail before forcing deterministic test state.
+        Thread.sleep(200);
+
+        AtomicBoolean shouldReconnect = getField(client, "shouldReconnect", AtomicBoolean.class);
+        shouldReconnect.set(false);
+
+        AtomicBoolean isConnected = getField(client, "isConnected", AtomicBoolean.class);
+        isConnected.set(true);
+
+        WebSocket webSocket = Mockito.mock(WebSocket.class);
+        setField(client, "webSocket", webSocket);
+        return webSocket;
     }
 }
