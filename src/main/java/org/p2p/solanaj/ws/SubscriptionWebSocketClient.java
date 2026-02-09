@@ -83,6 +83,7 @@ public class SubscriptionWebSocketClient {
     private final AtomicBoolean shouldReconnect = new AtomicBoolean(true);
     
     private final Map<String, SubscriptionInfo> subscriptions = new ConcurrentHashMap<>();
+    private final Map<Long, SubscriptionInfo> activeSubscriptions = new ConcurrentHashMap<>();
     private final Map<Long, NotificationEventListener> subscriptionListeners = new ConcurrentHashMap<>();
     private final Map<Long, String> subscriptionToAccount = new ConcurrentHashMap<>();
     private final AtomicLong requestIdCounter = new AtomicLong(1);
@@ -150,12 +151,44 @@ public class SubscriptionWebSocketClient {
     public static SubscriptionWebSocketClient getInstance(String endpoint) {
         try {
             URI endpointURI = new URI(endpoint);
-            String scheme = "https".equals(endpointURI.getScheme()) ? "wss" : "ws";
-            String wsEndpoint = scheme + "://" + endpointURI.getHost();
+            String wsEndpoint = toWebSocketEndpoint(endpointURI);
             return new SubscriptionWebSocketClient(wsEndpoint);
         } catch (URISyntaxException e) {
             throw new IllegalArgumentException("Invalid endpoint URI", e);
         }
+    }
+
+    private static String toWebSocketEndpoint(URI endpointURI) {
+        String scheme = endpointURI.getScheme();
+        if (scheme == null) {
+            throw new IllegalArgumentException("Endpoint URI scheme is required");
+        }
+
+        String wsScheme;
+        switch (scheme.toLowerCase()) {
+            case "https":
+                wsScheme = "wss";
+                break;
+            case "http":
+                wsScheme = "ws";
+                break;
+            case "wss":
+            case "ws":
+                wsScheme = scheme.toLowerCase();
+                break;
+            default:
+                throw new IllegalArgumentException("Unsupported endpoint URI scheme: " + scheme);
+        }
+
+        String authority = endpointURI.getRawAuthority();
+        if (authority == null || authority.isBlank()) {
+            throw new IllegalArgumentException("Endpoint URI authority is required");
+        }
+
+        String path = endpointURI.getRawPath() == null ? "" : endpointURI.getRawPath();
+        String query = endpointURI.getRawQuery() == null ? "" : "?" + endpointURI.getRawQuery();
+
+        return wsScheme + "://" + authority + path + query;
     }
 
     /**
@@ -250,10 +283,10 @@ public class SubscriptionWebSocketClient {
                 String requestId = messageNode.has("id") ? messageNode.get("id").asText() : null;
                 
                 if (requestId != null) {
-                    SubscriptionInfo info = subscriptions.get(requestId);
+                    SubscriptionInfo info = subscriptions.remove(requestId);
                     if (info != null) {
+                        activeSubscriptions.put((long) subscriptionId, info);
                         subscriptionListeners.put((long) subscriptionId, info.listener);
-                        subscriptions.remove(requestId);
                         
                         // Track the account for this subscription
                         String account = extractAccountFromRequest((CustomRpcRequest) info.request);
@@ -594,23 +627,15 @@ public class SubscriptionWebSocketClient {
      * @param subscriptionId The subscription ID to unsubscribe from
      */
     public void unsubscribe(Long subscriptionId) {
+        SubscriptionInfo subscriptionInfo = activeSubscriptions.remove(subscriptionId);
         NotificationEventListener listener = subscriptionListeners.remove(subscriptionId);
         String account = subscriptionToAccount.remove(subscriptionId);
         
-        if (listener != null) {
+        if (listener != null && subscriptionInfo != null) {
             List<Object> params = new ArrayList<>();
             params.add(subscriptionId);
-            
-            // Find the unsubscribe method for this subscription
-            String unsubscribeMethod = "accountUnsubscribe"; // Default
-            for (SubscriptionInfo info : subscriptions.values()) {
-                if (info.listener == listener) {
-                    unsubscribeMethod = info.unsubscribeMethod;
-                    break;
-                }
-            }
-            
-            CustomRpcRequest unsubRequest = new CustomRpcRequest(unsubscribeMethod, params);
+
+            CustomRpcRequest unsubRequest = new CustomRpcRequest(subscriptionInfo.unsubscribeMethod, params);
             unsubRequest.setId(String.valueOf(requestIdCounter.getAndIncrement()));
             
             sendRequest(unsubRequest);
@@ -669,17 +694,28 @@ public class SubscriptionWebSocketClient {
      */
     private void resubscribeAll() {
         LOGGER.info("Resubscribing to all active subscriptions");
-        Map<String, SubscriptionInfo> currentSubscriptions = new ConcurrentHashMap<>(subscriptions);
+
+        List<SubscriptionInfo> currentSubscriptions = new ArrayList<>();
+        currentSubscriptions.addAll(activeSubscriptions.values());
+        currentSubscriptions.addAll(subscriptions.values());
+
         subscriptions.clear();
+        activeSubscriptions.clear();
+        subscriptionListeners.clear();
+        subscriptionToAccount.clear();
         
-        for (SubscriptionInfo info : currentSubscriptions.values()) {
+        for (SubscriptionInfo info : currentSubscriptions) {
             String requestId = String.valueOf(requestIdCounter.getAndIncrement());
             CustomRpcRequest newRequest = new CustomRpcRequest(info.request.getMethod(), info.request.getParams());
             newRequest.setId(requestId);
             
-            // Create a new CompletableFuture for the resubscription
-            CompletableFuture<Long> newFuture = new CompletableFuture<>();
-            SubscriptionInfo newInfo = new SubscriptionInfo(newRequest, info.listener, info.method, info.unsubscribeMethod, newFuture);
+            SubscriptionInfo newInfo = new SubscriptionInfo(
+                    newRequest,
+                    info.listener,
+                    info.method,
+                    info.unsubscribeMethod,
+                    info.subscriptionFuture
+            );
             subscriptions.put(requestId, newInfo);
             sendRequest(newRequest);
         }

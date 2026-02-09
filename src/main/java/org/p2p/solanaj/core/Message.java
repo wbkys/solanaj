@@ -5,7 +5,9 @@ import org.p2p.solanaj.utils.ShortvecEncoding;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 public class Message {
     private class MessageHeader {
@@ -72,6 +74,7 @@ public class Message {
 
         List<AccountMeta> keysList = getAccountKeys();
         int accountKeysSize = keysList.size();
+        Map<PublicKey, Integer> accountIndexMap = createAccountIndexMap(keysList);
 
         byte[] accountAddressesLength = ShortvecEncoding.encodeLength(accountKeysSize);
 
@@ -83,11 +86,11 @@ public class Message {
 
             byte[] keyIndices = new byte[keysSize];
             for (int i = 0; i < keysSize; i++) {
-                keyIndices[i] = (byte) findAccountIndex(keysList, instruction.getKeys().get(i).getPublicKey());
+                keyIndices[i] = (byte) findAccountIndex(accountIndexMap, instruction.getKeys().get(i).getPublicKey());
             }
 
             CompiledInstruction compiledInstruction = new CompiledInstruction();
-            compiledInstruction.programIdIndex = (byte) findAccountIndex(keysList, instruction.getProgramId());
+            compiledInstruction.programIdIndex = (byte) findAccountIndex(accountIndexMap, instruction.getProgramId());
             compiledInstruction.keyIndicesCount = ShortvecEncoding.encodeLength(keysSize);
             compiledInstruction.keyIndices = keyIndices;
             compiledInstruction.dataLength = ShortvecEncoding.encodeLength(instruction.getData().length);
@@ -152,13 +155,19 @@ public class Message {
         return accounts.getList();
     }
 
-    private int findAccountIndex(List<AccountMeta> accountMetaList, PublicKey key) {
+    private Map<PublicKey, Integer> createAccountIndexMap(List<AccountMeta> accountMetaList) {
+        Map<PublicKey, Integer> accountIndexMap = new HashMap<>();
         for (int i = 0; i < accountMetaList.size(); i++) {
-            if (accountMetaList.get(i).getPublicKey().equals(key)) {
-                return i;
-            }
+            accountIndexMap.put(accountMetaList.get(i).getPublicKey(), i);
         }
+        return accountIndexMap;
+    }
 
-        throw new RuntimeException("unable to find account index");
+    private int findAccountIndex(Map<PublicKey, Integer> accountIndexMap, PublicKey key) {
+        Integer index = accountIndexMap.get(key);
+        if (index == null) {
+            throw new RuntimeException("unable to find account index");
+        }
+        return index;
     }
 }
